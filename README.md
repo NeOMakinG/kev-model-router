@@ -118,3 +118,24 @@ the file; `model` is what gets written into the forwarded request body
 ## License
 
 MIT
+
+## Benchmark (live, kev-4b on CPU, 3 routes: fast / code / powerful)
+
+10 probe questions, one pass each, same conversation caching measured per probe:
+
+| probe | expected | routed | confidence | first call | cached |
+|---|---|---|---|---|---|
+| lookup | fast | fast | 0.99 | 1.05 s | 5 ms |
+| haiku | fast | fast | 0.97 | 1.09 s | 5 ms |
+| extract | fast | fast | 1.00 | 1.32 s | 6 ms |
+| translate | fast | fast | 0.43 | 1.19 s | 5 ms |
+| debug stack trace | code | code | 0.92 | 1.23 s | 7 ms |
+| refactor | code | code | 0.94 | 1.24 s | 5 ms |
+| sql | code | code | 0.93 | 1.27 s | 5 ms |
+| strategy | powerful | powerful | 0.99 | 1.26 s | 6 ms |
+| longdoc | powerful | powerful | 0.80 | 1.23 s | 6 ms |
+| policy | powerful | powerful | 0.95 | 1.22 s | 6 ms |
+
+**Accuracy 10/10.** Routing overhead: ~1.2 s once per conversation (kev-4b on
+CPU), then ~0 ms thanks to the per-conversation cache. Run it yourself:
+`python3 scripts/benchmark.py` (needs a kev server and the echo provider).
