@@ -1,0 +1,1 @@
+{"id": "chatcmpl-echo", "object": "chat.completion", "model": "MODEL_WAS_HERE", "choices": [{"index": 0, "message": {"role": "assistant", "content": "OK"}, "finish_reason": "stop"}]}
