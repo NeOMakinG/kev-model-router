@@ -103,7 +103,7 @@ class RouterState:
 
         if route_name is None:  # fail-open
             self.stats["fail_open"] += 1
-            route_name = self.cfg["default_model"]
+            route_name = self.cfg["default_route"]
             source = "fail-open"
         else:
             self.stats["routed"] += 1
@@ -116,7 +116,10 @@ class RouterState:
                 route_name = self.cfg["complexity_route"]
                 self.stats["upgraded"] += 1
 
-        route = self.cfg["routes"][route_name]
+        route = self.cfg["routes"].get(route_name)
+        if route is None:  # config inconsistency guard: never 500
+            route_name = next(iter(self.cfg["routes"]))
+            route = self.cfg["routes"][route_name]
         decision = {"route": route_name, "target": route.get("base_url"),
                     "model": route.get("model"), "confidence": round(conf, 2),
                     "complexity": complexity, "source": source}

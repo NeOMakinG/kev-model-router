@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 CFG = {
     "kev_url": "http://kev-stub/v1/systemone",
     "listen_port": 8323,
-    "default_model": "fast",
+    "default_route": "fast",
     "kev_timeout_s": 1.0,
     "cache_ttl_s": 3600,
     "max_state_chars": 6000,
