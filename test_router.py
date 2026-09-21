@@ -76,9 +76,26 @@ def test_anthropic_content_blocks():
 def test_config_env_targets():
     import os
     os.environ["KEV_ROUTER_TARGET_FAST"] = "http://from-env:9999"
-    cfg = load_config()
+    # hermetic: explicit missing path -> DEFAULT_CONFIG (prod yaml in cwd
+    # must not shadow this test)
+    cfg = load_config(path="/nonexistent-kev-router-test.yaml")
     assert cfg["routes"]["fast"]["base_url"] == "http://from-env:9999"
     del os.environ["KEV_ROUTER_TARGET_FAST"]
+
+
+def test_join_url_no_double_prefix():
+    from kev_router.server import join_url
+    # target with /v1 + incoming /v1/chat/completions -> single /v1
+    assert (join_url("http://h:8317/v1", "/v1/chat/completions")
+            == "http://h:8317/v1/chat/completions")
+    # target without /v1 -> plain join
+    assert (join_url("http://h:8317", "/v1/chat/completions")
+            == "http://h:8317/v1/chat/completions")
+    # exact-prefix path (e.g. target .../v1 + path /v1)
+    assert join_url("http://h:8317/v1", "/v1") == "http://h:8317/v1"
+    # trailing slash normalized
+    assert (join_url("http://h:8317/v1/", "/v1/messages")
+            == "http://h:8317/v1/messages")
 
 
 def test_e2e_forward_and_header():

@@ -127,6 +127,19 @@ class RouterState:
         return decision
 
 
+from urllib.parse import urlparse
+
+def join_url(target: str, path: str) -> str:
+    """Join a target base URL with an incoming path, avoiding duplicated
+    path prefixes (e.g. target '.../v1' + path '/v1/chat/completions'
+    must give '.../v1/chat/completions', not '.../v1/v1/...')."""
+    t = target.rstrip("/")
+    p = path if path.startswith("/") else "/" + path
+    tp = urlparse(t).path.rstrip("/")
+    if tp and (p == tp or p.startswith(tp + "/")):
+        p = p[len(tp):]
+    return t + p
+
 def create_app(cfg: dict | None = None) -> FastAPI:
     st = RouterState(cfg or load_config())
     app = FastAPI(title="kev-router", version="0.1.0",
@@ -156,14 +169,14 @@ def create_app(cfg: dict | None = None) -> FastAPI:
             if body.get("stream"):
                 def gen():
                     with httpx.Client(timeout=600) as c:
-                        with c.stream("POST", f"{target}{path}", json=body,
+                        with c.stream("POST", join_url(target, path), json=body,
                                       headers=fwd) as r:
                             for chunk in r.iter_raw():
                                 yield chunk
                 return StreamingResponse(gen(), media_type="text/event-stream",
                                          headers={"x-kev-route": json.dumps(dec)})
             async with httpx.AsyncClient(timeout=600) as c:
-                r = await c.post(f"{target}{path}", json=body, headers=fwd)
+                r = await c.post(join_url(target, path), json=body, headers=fwd)
             return Response(r.content, status_code=r.status_code,
                             media_type=r.headers.get(
                                 "content-type", "application/json"),
