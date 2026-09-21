@@ -8,6 +8,7 @@ blocks traffic (fail-open to the default route).
 import hashlib
 import json
 import os
+import re
 import time
 
 import httpx
@@ -21,12 +22,47 @@ PASS_HEADERS = ("authorization", "x-api-key", "content-type", "accept",
                 "anthropic-version", "x-request-id", "user-agent")
 
 
+def messages_contains_image(messages: list) -> bool:
+    """True if any message carries image content (Anthropic or OpenAI shape)."""
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        c = m.get("content")
+        if isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict) and b.get("type") in ("image", "image_url"):
+                    return True
+        elif isinstance(c, str) and "data:image/" in c:
+            return True
+    return False
+
+
+def estimate_tokens(messages: list) -> int:
+    """Rough token estimate: chars/4 for text + flat cost per image."""
+    chars = 0
+    images = 0
+    for m in messages:
+        c = m.get("content") if isinstance(m, dict) else None
+        if isinstance(c, str):
+            chars += len(c)
+        elif isinstance(c, list):
+            for b in c:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "text":
+                    chars += len(b.get("text", ""))
+                elif b.get("type") in ("image", "image_url"):
+                    images += 1
+    return chars // 4 + images * 1500
+
+
 class RouterState:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.cache: dict[str, tuple[dict, float]] = {}
         self.stats = {"routed": 0, "cache_hits": 0, "fail_open": 0,
-                      "upgraded": 0, "errors": 0}
+                      "upgraded": 0, "lowconf_demoted": 0,
+                      "overflow_rerouted": 0, "errors": 0}
 
     # -- kev ---------------------------------------------------------------
     def ask_kev(self, state: str) -> dict | None:
@@ -78,9 +114,17 @@ class RouterState:
         c = next((m.get("content", "") for m in reversed(messages)
                   if isinstance(m, dict) and m.get("role") == "user"), "")
         if isinstance(c, list):
-            c = " ".join(b.get("text", "") for b in c if isinstance(b, dict))
-        return str(c)[: int(os.environ.get("KEV_ROUTER_MAX_STATE_CHARS",
-                                           str(2000)))]
+            c = " ".join(b.get("text", "") for b in c
+                         if isinstance(b, dict) and b.get("type") == "text")
+        c = str(c)
+        # strip Claude Code wrapper noise (system reminders, env blocks) so
+        # classification sees the user's actual words
+        c = re.sub(r"<system-reminder>.*?</system-reminder>", " ", c, flags=re.S)
+        c = re.sub(r"<env>.*?</env>", " ", c, flags=re.S).strip()
+        if not c:  # image-only or fully-stripped message
+            c = "[non-text content]"
+        return c[: int(os.environ.get("KEV_ROUTER_MAX_STATE_CHARS",
+                                      str(2000)))]
 
     def decide(self, messages: list) -> dict:
         key = self.conv_key(messages)
@@ -99,13 +143,20 @@ class RouterState:
         route_name = None
         complexity = None
         conf = 0.0
-        ans = self.ask_kev(self.last_user(messages))
-        if ans:
-            rc = ans.get("model_route", {})
-            name = rc.get("choice")
-            if name in self.cfg["routes"]:
-                route_name, conf = name, rc.get("confidence", 0.0)
-            complexity = ans.get("complexity", {}).get("score")
+        source = None
+        if messages_contains_image(messages):
+            mm = next((n for n, rt in self.cfg["routes"].items()
+                       if rt.get("multimodal")), None)
+            if mm:  # deterministic: images need the multimodal route
+                route_name, conf, source = mm, 1.0, "image"
+        if source is None:
+            ans = self.ask_kev(self.last_user(messages))
+            if ans:
+                rc = ans.get("model_route", {})
+                name = rc.get("choice")
+                if name in self.cfg["routes"]:
+                    route_name, conf = name, rc.get("confidence", 0.0)
+                complexity = ans.get("complexity", {}).get("score")
 
         if route_name is None:  # fail-open
             self.stats["fail_open"] += 1
@@ -113,7 +164,19 @@ class RouterState:
             source = "fail-open"
         else:
             self.stats["routed"] += 1
-            source = "kev"
+            if source is None:
+                source = "kev"
+            # low-confidence guard: an unsure kev decision must never gamble
+            # on a premium tier (wrapper noise can read as "automation");
+            # demote to the default cheap route unless the task is complex
+            floor = float(self.cfg.get("lowconf_min_confidence", 0.5))
+            if (source == "kev" and conf < floor
+                    and route_name != self.cfg["default_route"]
+                    and route_name in self.cfg["routes"]
+                    and (complexity is None or complexity < self.cfg.get(
+                        "complexity_threshold", 3.0))):
+                route_name = self.cfg["default_route"]
+                self.stats["lowconf_demoted"] += 1
             # complexity override: cheap route but heavy task -> upgrade
             if (route_name != self.cfg["complexity_route"]
                     and complexity is not None
@@ -126,6 +189,30 @@ class RouterState:
         if route is None:  # config inconsistency guard: never 500
             route_name = next(iter(self.cfg["routes"]))
             route = self.cfg["routes"][route_name]
+        # context-window guard: a payload bigger than the chosen model's
+        # window would 400 upstream (context overflow). Reroute to the
+        # largest declared window, respecting modality (images stay on a
+        # multimodal route even when rerouted).
+        est = estimate_tokens(messages)
+        cap = route.get("max_context_tokens")
+        if cap is not None and est > int(cap):
+            need_mm = messages_contains_image(messages)
+
+            def fits(n):
+                rt = self.cfg["routes"][n]
+                c = rt.get("max_context_tokens")
+                return c is not None and est <= int(c) and (
+                    rt.get("multimodal") or not need_mm)
+
+            candidates = [n for n in self.cfg["routes"] if fits(n)]
+            if candidates:
+                big = max(candidates, key=lambda n: int(
+                    self.cfg["routes"][n]["max_context_tokens"]))
+                if big != route_name:
+                    route_name = big
+                    route = self.cfg["routes"][big]
+                    source = "overflow"
+                    self.stats["overflow_rerouted"] += 1
         decision = {"route": route_name, "target": route.get("base_url"),
                     "model": route.get("model"), "confidence": round(conf, 2),
                     "complexity": complexity, "source": source}

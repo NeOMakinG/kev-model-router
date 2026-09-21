@@ -73,6 +73,76 @@ def test_anthropic_content_blocks():
     assert dec["route"] == "fast"
 
 
+def test_image_short_circuits_to_multimodal():
+    cfg = dict(CFG)
+    cfg["routes"] = {
+        "fast": {"base_url": "http://fast-stub", "model": "m-fast"},
+        "vision": {"base_url": "http://vision-stub", "model": "m-vision",
+                   "multimodal": True},
+    }
+    st = RouterState(cfg)
+    with patch.object(RouterState, "ask_kev") as m:
+        dec = st.decide([{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64",
+                                         "media_type": "image/png",
+                                         "data": "xxx"}},
+            {"type": "text", "text": "what is this?"}]}])
+    assert dec["route"] == "vision" and dec["source"] == "image"
+    m.assert_not_called()  # kev never consulted for images
+
+
+def test_lowconf_premium_demoted_to_default():
+    st = RouterState(dict(CFG))
+    ans = _kev_ok("powerful", complexity=1.2)
+    ans["model_route"]["confidence"] = 0.42  # below floor 0.5
+    with patch.object(RouterState, "ask_kev", return_value=ans):
+        dec = st.decide([{"role": "user", "content": "hey"}])
+    assert dec["route"] == "fast"  # default cheap route, not premium
+
+
+def test_noise_stripped_before_classification():
+    st = RouterState(dict(CFG))
+    noisy = ("<system-reminder>Long automation context with tools list</system-reminder>"
+             "<env>platform: osx</env> hey")
+    with patch.object(RouterState, "ask_kev",
+                      return_value=_kev_ok("fast")) as m:
+        st.decide([{"role": "user", "content": noisy}])
+    sent = m.call_args.args[0]
+    assert "automation context" not in sent and sent.strip() == "hey"
+
+
+def test_overflow_reroutes_to_biggest_window():
+    cfg = dict(CFG)
+    cfg["routes"] = {
+        "fast": {"base_url": "http://f", "model": "m", "max_context_tokens": 1000},
+        "big": {"base_url": "http://b", "model": "m2", "max_context_tokens": 100000},
+    }
+    st = RouterState(cfg)
+    with patch.object(RouterState, "ask_kev", return_value=_kev_ok("fast")):
+        dec = st.decide([{"role": "user", "content": "x" * 20000}])  # ~5k tokens
+    assert dec["route"] == "big" and dec["source"] == "overflow"
+
+
+def test_overflow_respects_multimodal():
+    cfg = dict(CFG)
+    cfg["routes"] = {
+        "fast": {"base_url": "http://f", "model": "m", "max_context_tokens": 1000},
+        "bigtext": {"base_url": "http://b", "model": "m2",
+                    "max_context_tokens": 100000},
+        "vision": {"base_url": "http://v", "model": "m3",
+                   "max_context_tokens": 50000, "multimodal": True},
+    }
+    st = RouterState(cfg)
+    with patch.object(RouterState, "ask_kev", return_value=_kev_ok("fast")):
+        dec = st.decide([{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64",
+                                         "media_type": "image/png",
+                                         "data": "x" * 100}},
+            {"type": "text", "text": "y" * 20000}]}])  # needs mm + big window
+    # vision (50k, multimodal) fits; bigtext excluded (not multimodal)
+    assert dec["route"] == "vision"
+
+
 def test_config_env_targets():
     import os
     os.environ["KEV_ROUTER_TARGET_FAST"] = "http://from-env:9999"

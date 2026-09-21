@@ -3,17 +3,21 @@
 # router reads them from the environment at startup.
 kev_url: http://127.0.0.1:8009/v1/systemone   # your local kev serve
 listen_port: 8323
-default_model: fast            # fail-open route when kev is unreachable
-kev_timeout_s: 4.0             # kev answers in ~0.1-1.5s; beyond that, fail open
+default_route: fast            # fail-open route when kev is unreachable
+kev_timeout_s: 10.0            # kev answers in ~1-4s on big states; beyond that, fail open
 cache_ttl_s: 3600              # per-conversation decision cache (protects prompt caches)
+fail_cache_ttl_s: 45           # fail-open decisions cached briefly so kev is retried fast
 complexity_threshold: 3.0      # 1-4 scale; >= threshold upgrades to complexity_route
 complexity_route: powerful
+lowconf_min_confidence: 0.5    # kev less sure than this -> demote to default_route (never gamble premium)
+                               # unless complexity >= threshold
 
 routes:
   fast:
     target: {type: env, env: KEV_ROUTER_TARGET_FAST}   # e.g. a local small model
     model: qwen3:0.6b
-    criteria: "Direct lookups, extraction, classification, short localized edits"
+    max_context_tokens: 32000   # optional: enables the overflow reroute guard
+    criteria: "Greetings, small talk, direct lookups, extraction, classification, short localized edits"
   code:
     target: {type: env, env: KEV_ROUTER_TARGET_CODE}   # e.g. a local coding model
     model: deepseek-v4-flash
@@ -21,4 +25,11 @@ routes:
   powerful:
     target: {type: env, env: KEV_ROUTER_TARGET_POWERFUL}  # e.g. OpenRouter or a cloud API
     model: anthropic/claude-opus-4.6
+    max_context_tokens: 190000
     criteria: "Complex reasoning, architecture, long documents, high-stakes decisions"
+  vision:
+    target: {type: env, env: KEV_ROUTER_TARGET_VISION}
+    model: openai/gpt-5-vision
+    multimodal: true            # requests carrying images are pinned to this route
+    max_context_tokens: 380000
+    criteria: "Image analysis, screenshots, multimodal input"
