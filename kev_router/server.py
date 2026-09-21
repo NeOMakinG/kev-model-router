@@ -80,15 +80,21 @@ class RouterState:
         if isinstance(c, list):
             c = " ".join(b.get("text", "") for b in c if isinstance(b, dict))
         return str(c)[: int(os.environ.get("KEV_ROUTER_MAX_STATE_CHARS",
-                                           str(6000)))]
+                                           str(2000)))]
 
     def decide(self, messages: list) -> dict:
         key = self.conv_key(messages)
         hit = self.cache.get(key)
         now = time.time()
-        if hit and now - hit[1] < self.cfg["cache_ttl_s"]:
-            self.stats["cache_hits"] += 1
-            return {**hit[0], "source": "cache"}
+        if hit:
+            # fail-open decisions are cached only briefly so kev is retried
+            # quickly instead of poisoning the conversation for a full TTL
+            ttl = (self.cfg.get("fail_cache_ttl_s", 45)
+                   if hit[0].get("source") == "fail-open"
+                   else self.cfg["cache_ttl_s"])
+            if now - hit[1] < ttl:
+                self.stats["cache_hits"] += 1
+                return {**hit[0], "source": "cache"}
 
         route_name = None
         complexity = None
